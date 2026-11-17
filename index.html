@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SolGuard NG — Solana Wallet Safety Checker</title>
+<style>
+  :root{--green:#0e9f4e;--dark:#0b1f14;--card:#12291b;--line:#1f4230;--text:#e8f5ec;--muted:#9dbfa9;--warn:#f5b301;--bad:#ef4444;--ok:#22c55e}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--dark);color:var(--text);padding:16px;max-width:720px;margin:0 auto}
+  h1{font-size:1.5rem;margin:.2rem 0}
+  .tag{color:var(--muted);margin:.2rem 0 1rem}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  input{flex:1;min-width:220px;padding:12px;border-radius:10px;border:1px solid var(--line);background:#0e2417;color:var(--text);font-size:.95rem}
+  button{padding:12px 16px;border:0;border-radius:10px;background:var(--green);color:#fff;font-weight:600;cursor:pointer}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--muted)}
+  button:disabled{opacity:.5}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-top:14px}
+  .badge{display:inline-block;padding:4px 10px;border-radius:999px;font-weight:700;font-size:.85rem}
+  .b-ok{background:#14532d;color:#86efac}.b-low{background:#1e3a2a;color:#bbf7d0}.b-med{background:#4a3503;color:#fcd34d}.b-high{background:#4c1111;color:#fca5a5}
+  .finding{border-left:4px solid var(--line);padding:8px 10px;margin:10px 0;background:#0e2417;border-radius:8px}
+  .finding.high{border-color:var(--bad)}.finding.med{border-color:var(--warn)}.finding.info{border-color:var(--green)}
+  .finding h4{margin:0 0 4px;font-size:.98rem}.finding p{margin:0;color:var(--muted);font-size:.9rem}
+  table{width:100%;border-collapse:collapse;font-size:.85rem}
+  td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;word-break:break-all}
+  .muted{color:var(--muted)} .small{font-size:.85rem}
+  .err{color:#fca5a5}
+  footer{margin:22px 0 8px;color:var(--muted);font-size:.85rem}
+</style>
+</head>
+<body>
+  <h1>🛡️ SolGuard NG</h1>
+  <p class="tag">Free Solana wallet safety checker. Paste any wallet address — get a plain-language risk report. <b>Read-only:</b> we never ask you to connect a wallet or sign anything.</p>
+
+  <div class="row">
+    <input id="addr" type="text" placeholder="Paste a Solana wallet address…" autocomplete="off" spellcheck="false">
+    <button id="go">Check wallet</button>
+    <button id="sample" class="ghost">Try a demo wallet</button>
+  </div>
+  <p id="status" class="small muted"></p>
+  <div id="out"></div>
+
+  <footer>
+    Built for Nigerian and African Solana users: most first losses come from scam tokens and risky approvals, not hacks.
+    SolGuard NG is open source and educational — it cannot move funds and never will ask for a seed phrase.
+    Anyone who asks for your seed phrase is a thief. No exceptions.
+  </footer>
+
+<script>
+const RPC = 'https://api.mainnet-beta.solana.com';
+const TOKEN_PROGRAMS = [
+  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+  'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
+];
+const DEMO = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM'; // large public exchange wallet — shows real flags (frozen + dust tokens)
+
+const $ = id => document.getElementById(id);
+const short = a => a.slice(0,4) + '…' + a.slice(-4);
+
+async function rpc(method, params){
+  const r = await fetch(RPC, {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({jsonrpc:'2.0', id:1, method, params})});
+  if(!r.ok) throw new Error('RPC HTTP ' + r.status);
+  const j = await r.json();
+  if(j.error) throw new Error(j.error.message || 'RPC error');
+  return j.result;
+}
+
+function validAddress(a){
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(a);
+}
+
+async function check(address){
+  $('status').textContent = 'Reading the blockchain… this is read-only and moves nothing.';
+  $('out').innerHTML = '';
+  const findings = [];
+  let score = 0;
+  const add = (sev, pts, title, body) => { findings.push({sev, title, body}); score += pts; };
+
+  // 1) Account overview
+  const acc = await rpc('getAccountInfo', [address, {encoding:'jsonParsed'}]);
+  if(!acc || !acc.value){
+    $('out').innerHTML = '<div class="card"><p class="err">This address has no account on Solana mainnet yet — it may be brand new, or not a wallet address. Nothing to check.</p></div>';
+    $('status').textContent = '';
+    return;
+  }
+  const sol = acc.value.lamports / 1e9;
+  if(acc.value.executable){
+    add('info', 0, 'This is a program, not a personal wallet', 'The address is executable code (a smart contract/program). Safety checks below are written for personal wallets.');
+  }
+
+  // 2) Recent activity
+  const sigs = await rpc('getSignaturesForAddress', [address, {limit:25}]);
+  const failed = sigs.filter(s => s.err).length;
+  if(sigs.length && failed / sigs.length > 0.3){
+    add('med', 5, 'Many failed transactions', Math.round(failed/sigs.length*100) + '% of the last ' + sigs.length + ' transactions failed. That can mean bots, rushed trading tools, or repeated attempts to use broken/scam sites.');
+  }
+  if(sigs.length === 0){
+    add('info', 0, 'No transaction history', 'This wallet has funds or tokens but no visible transactions in the recent record — treat unexpected claims about its history with suspicion.');
+  }
+
+  // 3) Token accounts (both token programs)
+  let tokenAccounts = [];
+  for(const prog of TOKEN_PROGRAMS){
+    const res = await rpc('getTokenAccountsByOwner', [address, {programId: prog}, {encoding:'jsonParsed'}]);
+    tokenAccounts = tokenAccounts.concat(res.value || []);
+  }
+  const held = tokenAccounts.map(v => v.account.data.parsed.info)
+    .filter(i => i.tokenAmount && (i.tokenAmount.uiAmount > 0 || i.state === 'frozen'));
+
+  // 3a) Delegates = approvals. On Solana a delegate can move up to the delegated amount.
+  const delegated = held.filter(i => i.delegate);
+  if(delegated.length){
+    add('high', 40, '⚠️ Active token approvals (delegates) found',
+      delegated.length + ' token account(s) have a delegate who can move tokens up to the approved amount without asking again. If you do not recognise the approval, revoke it in your wallet (look for "approvals" / connected apps) and move remaining funds to a fresh wallet.');
+  }
+  // 3b) Frozen accounts
+  const frozen = held.filter(i => i.state === 'frozen');
+  if(frozen.length){
+    add('high', 25, 'Frozen token account(s)', frozen.length + ' token account(s) are frozen by the token issuer — those tokens cannot be moved. This often happens with scam or controlled tokens.');
+  }
+  // 3c) Mint authorities (sample up to 30 mints)
+  const mints = [...new Set(held.map(i => i.mint))].slice(0, 30);
+  let mintInfos = [];
+  if(mints.length){
+    const multi = await rpc('getMultipleAccounts', [mints, {encoding:'jsonParsed'}]);
+    mintInfos = (multi.value || []).map((v, idx) => ({mint: mints[idx], info: v && v.data && v.data.parsed ? v.data.parsed.info : null}));
+  }
+  const withFreeze = mintInfos.filter(m => m.info && m.info.freezeAuthority);
+  if(withFreeze.length){
+    add('med', 10, 'Some tokens can be frozen by their issuer', withFreeze.length + ' of the checked tokens keep a freeze authority. The issuer can freeze your balance of that token at any time — common in scam tokens that let you buy but never sell.');
+  }
+  const withMintAuth = mintInfos.filter(m => m.info && m.info.mintAuthority);
+  if(withMintAuth.length){
+    add('info', 5, 'Some tokens can be printed by their issuer', withMintAuth.length + ' checked token(s) still have an active mint authority, so supply can be increased. Not automatically a scam (many legit tokens keep this), but worth knowing.');
+  }
+  // 3d) Dust / likely spam tokens
+  const dust = held.filter(i => {
+    const mi = mintInfos.find(m => m.mint === i.mint);
+    return mi && mi.info && mi.info.decimals === 0 && i.tokenAmount.uiAmount === 1;
+  });
+  if(dust.length >= 3){
+    add('med', 10, 'Likely spam / dust tokens', dust.length + ' single-unit, zero-decimal tokens — the classic pattern of airdropped scam NFTs/tokens sent to trick you into visiting a phishing site. Do not visit links in their names or images; just ignore or hide them in your wallet.');
+  }
+  if(held.length > 25){
+    add('info', 5, 'A lot of different tokens', 'This wallet holds ' + held.length + ' different tokens. Busy wallets collect dust over time — a tidy-up (closing empty accounts) also reclaims a little SOL rent.');
+  }
+  if(!delegated.length && !frozen.length){
+    add('info', 0, 'No approvals or freezes detected', 'None of the checked token accounts have an active delegate, and none are frozen. That is the cleanest part of this report.');
+  }
+
+  // Verdict
+  let band, cls;
+  if(score >= 55){ band = 'HIGH RISK — act now'; cls = 'b-high'; }
+  else if(score >= 25){ band = 'CAUTION — review the flags'; cls = 'b-med'; }
+  else if(score >= 10){ band = 'MOSTLY FINE — a few things to know'; cls = 'b-low'; }
+  else { band = 'LOOKS CLEAN'; cls = 'b-ok'; }
+
+  const tokenRows = held.slice(0, 40).map(i => {
+    const flags = [];
+    if(i.delegate) flags.push('⚠️ delegate set');
+    if(i.state === 'frozen') flags.push('🧊 frozen');
+    return '<tr><td>' + short(i.mint) + '</td><td>' + i.tokenAmount.uiAmountString + '</td><td>' + flags.join(' ') + '</td></tr>';
+  }).join('');
+
+  $('out').innerHTML =
+    '<div class="card">' +
+      '<div class="row" style="justify-content:space-between;align-items:center">' +
+        '<div><b>' + short(address) + '</b><div class="muted small">Balance: ' + sol.toFixed(4) + ' SOL · Tokens held: ' + held.length + ' · Recent txs checked: ' + sigs.length + '</div></div>' +
+        '<span class="badge ' + cls + '">' + band + '</span>' +
+      '</div>' +
+      '<div class="muted small" style="margin-top:6px">Risk score: ' + score + ' / 100 (higher = more flags). A score is a guide, not a guarantee — always verify before you trust.</div>' +
+    '</div>' +
+    '<div class="card"><h3 style="margin-top:0">What we found</h3>' +
+      findings.map(f => '<div class="finding ' + f.sev + '"><h4>' + f.title + '</h4><p>' + f.body + '</p></div>').join('') +
+    '</div>' +
+    (tokenRows ? '<div class="card"><h3 style="margin-top:0">Tokens in this wallet</h3><table><tr><th>Token (mint)</th><th>Amount</th><th>Flags</th></tr>' + tokenRows + '</table></div>' : '');
+
+  $('status').textContent = 'Done. Report generated from live Solana mainnet data.';
+}
+
+$('go').addEventListener('click', async () => {
+  const a = $('addr').value.trim();
+  if(!validAddress(a)){ $('out').innerHTML = '<div class="card"><p class="err">That does not look like a Solana address. Check for spaces or missing characters and try again.</p></div>'; return; }
+  $('go').disabled = true;
+  try{ await check(a); }
+  catch(e){ $('out').innerHTML = '<div class="card"><p class="err">Could not complete the check (' + e.message + '). The public Solana network may be busy — wait a moment and try again.</p></div>'; $('status').textContent=''; }
+  $('go').disabled = false;
+});
+$('sample').addEventListener('click', () => { $('addr').value = DEMO; $('go').click(); });
+</script>
+</body>
+</html>
